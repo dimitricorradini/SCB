@@ -14,6 +14,8 @@
 #include <functional>
 #include <chrono>
 #include <cassert>
+#include <unordered_map>
+#include <unordered_set>
 
 using namespace std;
 
@@ -799,14 +801,39 @@ int main(int argc, char* argv[]) {
         topoData.push_back({topo.denomBrackets, tally});
     }
     
-    // ---- Generate numerator partitions ----
-    cerr << "Generating numerator partitions...\n";
-    vector<Integrand> allIntegrands;
+    // ---- Generate numerator partitions + on-the-fly orbit quotient ----
+    cerr << "Generating numerators + orbit-quotienting on the fly...\n";
+    
+    auto hashBracket = [](const Bracket& b) -> size_t {
+        size_t h = 0;
+        for (int i = 0; i < 4; i++) h = h * 131 + b[i];
+        return h;
+    };
+    auto hashInteg = [&](const Integrand& integ) -> size_t {
+        size_t h = 0;
+        for (auto& b : integ.num) h ^= hashBracket(b) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= 0xdeadbeef;
+        for (auto& b : integ.den) h ^= hashBracket(b) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        return h;
+    };
+    auto canonHash = [&](const Integrand& integ) -> size_t {
+        size_t best = hashInteg(applyGroup(fullGroup[0], integ));
+        for (size_t i = 1; i < fullGroup.size(); i++) {
+            size_t h = hashInteg(applyGroup(fullGroup[i], integ));
+            best = min(best, h);
+        }
+        return best;
+    };
+    
+    unordered_map<size_t, int> seen;
+    vector<Integrand> orbitReps;
+    long long totalGenerated = 0;
     
     for (int rep = 0; rep < (int)topoData.size(); rep++) {
         if (rep % 10 == 0 || rep == (int)topoData.size()-1)
             cerr << "  Topo " << rep << "/" << topoData.size() 
-                 << "  integrands: " << allIntegrands.size() << "\r" << flush;
+                 << "  total=" << totalGenerated
+                 << "  reps=" << orbitReps.size() << "\r" << flush;
         
         auto& td = topoData[rep];
         vector<vector<Bracket>> partitions;
@@ -814,6 +841,8 @@ int main(int argc, char* argv[]) {
         genPartitions(td.tally, td.denomBr, current, partitions);
         
         for (auto& numBr : partitions) {
+            totalGenerated++;
+            
             // Simplify: cancel matching brackets
             multiset<Bracket> denSet(td.denomBr.begin(), td.denomBr.end());
             vector<Bracket> remNum;
@@ -825,39 +854,21 @@ int main(int argc, char* argv[]) {
             vector<Bracket> remDen(denSet.begin(), denSet.end());
             sort(remNum.begin(), remNum.end());
             sort(remDen.begin(), remDen.end());
-            allIntegrands.push_back({remNum, remDen});
+            
+            Integrand integ = {remNum, remDen};
+            size_t h = canonHash(integ);
+            if (!seen.count(h)) {
+                seen[h] = orbitReps.size();
+                orbitReps.push_back(integ);
+            }
         }
     }
-    cerr << "\n  Total before symmetry: " << allIntegrands.size() << "\n";
-    
-    // ---- Orbit quotient ----
-    cerr << "Orbit-quotienting...\n";
-    map<Integrand, int> seen;
-    vector<Integrand> orbitReps;
-    for (auto& integ : allIntegrands) {
-        Integrand canon = canonicalize(integ, fullGroup);
-        if (!seen.count(canon)) {
-            seen[canon] = orbitReps.size();
-            orbitReps.push_back(integ);
-        }
-    }
+    cerr << "\n  Total generated: " << totalGenerated << "\n";
     cerr << "  Orbit representatives: " << orbitReps.size() << "\n";
     
-    // ---- Expand orbits ----
-    cerr << "Expanding orbits...\n";
-    set<Integrand> expandedSet;
-    vector<Integrand> expanded;
-    for (auto& rep : orbitReps) {
-        for (auto& g : fullGroup) {
-            Integrand img = applyGroup(g, rep);
-            if (expandedSet.insert(img).second)
-                expanded.push_back(img);
-        }
-    }
-    cerr << "  Expanded: " << expanded.size() << "\n";
-    
-    // ---- Numerical rank: streaming greedy selection ----
-    cerr << "Streaming greedy selection...\n";
+    // ---- Numerical rank on orbit-summed integrands ----
+    // Optimized: precompute bracket lookup for group-rotated kinematics
+    cerr << "Numerical rank computation on orbit-summed integrands...\n";
     mt19937 rng(42);
     uniform_real_distribution<double> dist(-2.0, 2.0);
     
@@ -867,40 +878,85 @@ int main(int argc, char* argv[]) {
         return tw;
     };
     
-    auto evalBr = [](const Bracket& br, const vector<Vec4>& tw) {
-        return det4(tw[br[0]], tw[br[1]], tw[br[2]], tw[br[3]]);
+    // Precompute inverse group actions (for twistor permutation)
+    vector<vector<int>> groupInv(fullGroup.size(), vector<int>(nTwistors));
+    for (int g = 0; g < (int)fullGroup.size(); g++) {
+        for (int i = 0; i < nTwistors; i++)
+            groupInv[g][i] = fullGroup[g].perm[i];
+    }
+    // Note: f^g(tw) = f(tw_g) where tw_g[i] = tw[g.perm[i]]
+    
+    // Enumerate all brackets that appear in any orbit rep
+    set<Bracket> allBrSet;
+    for (auto& rep : orbitReps) {
+        for (auto& b : rep.num) allBrSet.insert(b);
+        for (auto& b : rep.den) allBrSet.insert(b);
+    }
+    vector<Bracket> allBrackets(allBrSet.begin(), allBrSet.end());
+    map<Bracket, int> brIdx;
+    for (int i = 0; i < (int)allBrackets.size(); i++) brIdx[allBrackets[i]] = i;
+    int nBr = allBrackets.size();
+    cerr << "  Unique brackets in orbit reps: " << nBr << "\n";
+    
+    // Convert orbit reps to index form for fast evaluation
+    struct FastInteg {
+        vector<int> numIdx, denIdx;
     };
+    vector<FastInteg> fastReps(orbitReps.size());
+    for (int i = 0; i < (int)orbitReps.size(); i++) {
+        for (auto& b : orbitReps[i].num) fastReps[i].numIdx.push_back(brIdx[b]);
+        for (auto& b : orbitReps[i].den) fastReps[i].denIdx.push_back(brIdx[b]);
+    }
     
-    auto evalInteg = [&](const Integrand& integ, const vector<Vec4>& tw) {
-        double n = 1, d = 1;
-        for (auto& b : integ.num) n *= evalBr(b, tw);
-        for (auto& b : integ.den) d *= evalBr(b, tw);
-        return n / d;
-    };
+    int nReps = orbitReps.size();
+    int nKin = min(1500, nReps + 20);
     
-    int nExp = expanded.size();
-    // Use ~200 kinematic points (sufficient for rank < 100)
-    int nKin = min(1500, nExp + 20);
+    cerr << "  " << nReps << " orbit reps, " << nKin << " kin points\n";
     
-    cerr << "  Evaluating " << nExp << " integrands at " << nKin << " points...\n";
-    // Build transposed matrix: rows = integrands, cols = kin points
-    vector<vector<double>> matT(nExp, vector<double>(nKin));
+    // Build matrix: rows = orbit reps, cols = kin points
+    vector<vector<double>> matT(nReps, vector<double>(nKin));
+    int nGrp = fullGroup.size();
+    
     for (int k = 0; k < nKin; k++) {
-        if (k % 50 == 0) cerr << "    " << k << "/" << nKin << "\r" << flush;
+        if (k % 10 == 0) cerr << "    " << k << "/" << nKin << "\r" << flush;
         auto tw = randKin();
-        for (int j = 0; j < nExp; j++) matT[j][k] = evalInteg(expanded[j], tw);
+        
+        // Precompute bracket values at all group-rotated kinematics
+        // brCache[g][b] = value of bracket b at g-rotated tw
+        vector<vector<double>> brCache(nGrp, vector<double>(nBr));
+        for (int g = 0; g < nGrp; g++) {
+            // tw_g[i] = tw[g.perm[i]]
+            for (int b = 0; b < nBr; b++) {
+                brCache[g][b] = det4(
+                    tw[groupInv[g][allBrackets[b][0]]],
+                    tw[groupInv[g][allBrackets[b][1]]],
+                    tw[groupInv[g][allBrackets[b][2]]],
+                    tw[groupInv[g][allBrackets[b][3]]]);
+            }
+        }
+        
+        // Evaluate all orbit sums using cached brackets
+        for (int j = 0; j < nReps; j++) {
+            double sum = 0;
+            for (int g = 0; g < nGrp; g++) {
+                double n = 1, d = 1;
+                for (int idx : fastReps[j].numIdx) n *= brCache[g][idx];
+                for (int idx : fastReps[j].denIdx) d *= brCache[g][idx];
+                sum += n / d;
+            }
+            matT[j][k] = sum;
+        }
     }
     cerr << "\n";
     
+    // Incremental rank
     vector<int> indep;
-    // Incremental rank: maintain reduced basis
-    vector<vector<double>> basis; // reduced rows
-    vector<int> pivotCol;         // pivot column for each basis row
+    vector<vector<double>> basis;
+    vector<int> pivotCol;
     
-    for (int i = 0; i < nExp; i++) {
-        if (i % 1000 == 0) cerr << "  " << i << "/" << nExp << " found " << indep.size() << "\r" << flush;
+    for (int i = 0; i < nReps; i++) {
+        if (i % 500 == 0) cerr << "  " << i << "/" << nReps << " found " << indep.size() << "\r" << flush;
         
-        // Try to reduce row i against current basis
         vector<double> row = matT[i];
         for (int b = 0; b < (int)basis.size(); b++) {
             double f = row[pivotCol[b]];
@@ -908,7 +964,6 @@ int main(int argc, char* argv[]) {
             for (int j = 0; j < nKin; j++) row[j] -= f * basis[b][j];
         }
         
-        // Find pivot in reduced row
         int piv = -1;
         double best = 1e-8;
         for (int j = 0; j < nKin; j++) {
@@ -916,7 +971,6 @@ int main(int argc, char* argv[]) {
         }
         
         if (piv >= 0) {
-            // Normalize
             double inv = 1.0 / row[piv];
             for (int j = 0; j < nKin; j++) row[j] *= inv;
             basis.push_back(row);
@@ -924,15 +978,11 @@ int main(int argc, char* argv[]) {
             indep.push_back(i);
         }
     }
-    cerr << "\n  Independent: " << indep.size() << "\n";
+    cerr << "\n  Independent orbit reps: " << indep.size() << "\n";
     
-    // ---- Final re-quotient ----
-    set<Integrand> finalSeen;
+    // Extract independent orbit reps
     vector<Integrand> result;
-    for (int idx : indep) {
-        Integrand canon = canonicalize(expanded[idx], fullGroup);
-        if (finalSeen.insert(canon).second) result.push_back(expanded[idx]);
-    }
+    for (int idx : indep) result.push_back(orbitReps[idx]);
     
     auto t1 = chrono::steady_clock::now();
     cerr << "══════════════════════════════════\n";
