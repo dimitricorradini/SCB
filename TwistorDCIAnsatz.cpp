@@ -956,12 +956,12 @@ int main(int argc, char* argv[]) {
             for (int j = 0; j < nKin; j++) row[j] -= f * basis[b][j];
         }
         
-        // Relative pivot threshold: reject if residual is tiny compared to original row
+        // Relative pivot threshold
         double rowNorm = 0;
         for (int j = 0; j < nKin; j++) rowNorm = max(rowNorm, abs(matT[i][j]));
         
         int piv = -1;
-        double thresh = max(5e-6 * rowNorm, 1e-14);
+        double thresh = max(1e-5 * rowNorm, 1e-14);
         double best = thresh;
         for (int j = 0; j < nKin; j++) {
             if (abs(row[j]) > best) { best = abs(row[j]); piv = j; }
@@ -975,7 +975,87 @@ int main(int argc, char* argv[]) {
             indep.push_back(i);
         }
     }
-    cerr << "\n  Independent orbit reps: " << indep.size() << "\n";
+    cerr << "\n  Independent orbit reps (greedy): " << indep.size() << "\n";
+    
+    // Verify rank by full Gaussian elimination on selected rows
+    cerr << "  Verifying rank with fresh kinematics...\n";
+    int nVerify = indep.size() + 20;
+    vector<vector<double>> verifyMat(indep.size(), vector<double>(nVerify));
+    for (int k = 0; k < nVerify; k++) {
+        auto tw = randKin();
+        // Precompute bracket cache for all group rotations
+        vector<vector<double>> brCache(nGrp, vector<double>(nBr));
+        for (int g = 0; g < nGrp; g++)
+            for (int b = 0; b < nBr; b++)
+                brCache[g][b] = det4(
+                    tw[groupInv[g][allBrackets[b][0]]],
+                    tw[groupInv[g][allBrackets[b][1]]],
+                    tw[groupInv[g][allBrackets[b][2]]],
+                    tw[groupInv[g][allBrackets[b][3]]]);
+        for (int ji = 0; ji < (int)indep.size(); ji++) {
+            int j = indep[ji];
+            double sum = 0;
+            for (int g = 0; g < nGrp; g++) {
+                double n = 1, d = 1;
+                for (int idx : fastReps[j].numIdx) n *= brCache[g][idx];
+                for (int idx : fastReps[j].denIdx) d *= brCache[g][idx];
+                sum += n / d;
+            }
+            verifyMat[ji][k] = sum;
+        }
+    }
+    // Compute rank
+    auto verCopy = verifyMat;
+    int verRank = 0;
+    {
+        int m = verCopy.size(), n = verCopy[0].size();
+        int rank = 0;
+        for (int col = 0; col < n && rank < m; col++) {
+            int piv = -1; double best = 1e-10;
+            for (int r = rank; r < m; r++)
+                if (abs(verCopy[r][col]) > best) { best = abs(verCopy[r][col]); piv = r; }
+            if (piv < 0) continue;
+            swap(verCopy[rank], verCopy[piv]);
+            double inv = 1.0 / verCopy[rank][col];
+            for (int j = col; j < n; j++) verCopy[rank][j] *= inv;
+            for (int r = 0; r < m; r++) {
+                if (r == rank || abs(verCopy[r][col]) < 1e-14) continue;
+                double f = verCopy[r][col];
+                for (int j = col; j < n; j++) verCopy[r][j] -= f * verCopy[rank][j];
+            }
+            rank++;
+        }
+        verRank = rank;
+    }
+    cerr << "  Verified rank: " << verRank << " (greedy selected: " << indep.size() << ")\n";
+    
+    if (verRank < (int)indep.size()) {
+        cerr << "  Removing " << (indep.size() - verRank) << " spurious integrands...\n";
+        // Re-select using the verified matrix
+        vector<int> indep2;
+        vector<vector<double>> basis2;
+        vector<int> pivCol2;
+        for (int i = 0; i < (int)indep.size(); i++) {
+            vector<double> row = verifyMat[i];
+            for (int b = 0; b < (int)basis2.size(); b++) {
+                double f = row[pivCol2[b]];
+                if (abs(f) < 1e-12) continue;
+                for (int j = 0; j < nVerify; j++) row[j] -= f * basis2[b][j];
+            }
+            int piv = -1; double best = 1e-8;
+            for (int j = 0; j < nVerify; j++)
+                if (abs(row[j]) > best) { best = abs(row[j]); piv = j; }
+            if (piv >= 0) {
+                double inv = 1.0 / row[piv];
+                for (int j = 0; j < nVerify; j++) row[j] *= inv;
+                basis2.push_back(row);
+                pivCol2.push_back(piv);
+                indep2.push_back(indep[i]);
+            }
+        }
+        indep = indep2;
+        cerr << "  After cleanup: " << indep.size() << " independent orbit reps\n";
+    }
     
     // Extract independent orbit reps
     vector<Integrand> result;
