@@ -387,27 +387,27 @@ int main(int argc, char* argv[]) {
             // Random kinematics
             vector<Vec4> tw(nTw);
             for (int i = 0; i < nTw; i++) tw[i] = rv();
-            double alpha = dist(rng), gamma = dist(rng);
+            double alpha = 0.5 + dist(rng); // avoid near-zero
+            double gamma = 0.5 + dist(rng);
             
-            // Matrix entries: sum evalCollinear over orbit images
+            // Matrix entries: sum evalCollinear over orbit images, multiply by αγ
             for (int i = 0; i < nReps; i++) {
                 double val = 0;
                 for (auto& img : orbitImages[i])
                     val += evalCollinear(img, tw, nE, alpha, gamma);
-                M[k][i] = val;
+                M[k][i] = alpha * gamma * val;
             }
             
-            // RHS: -(1/L) * Res[L-1] / (αγ)
-            // Res[L-1] evaluated at collinear kinematics
+            // RHS: -Res[L-1] (already multiplied by αγ)
             if (L == 1) {
-                rhs[k] = -1.0 / (alpha * gamma);
+                rhs[k] = -1.0;
             } else {
                 vector<Vec4> ctw = tw;
                 ctw[nE] = ctw[1];
                 for (int j = 0; j < 4; j++)
                     ctw[nE+1][j] = alpha*ctw[0][j] + gamma*ctw[2][j];
                 double resVal = evalRes(prevResults[L-2], ctw);
-                rhs[k] = -(1.0/L) * resVal / (alpha * gamma);
+                rhs[k] = -(1.0/L) * resVal;
             }
         }
         cerr << "\n";

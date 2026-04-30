@@ -901,7 +901,7 @@ int main(int argc, char* argv[]) {
     }
     
     int nReps = orbitReps.size();
-    int nKin = min(1500, nReps + 20);
+    int nKin = 8000;
     
     cerr << "  " << nReps << " orbit reps, " << nKin << " kin points\n";
     
