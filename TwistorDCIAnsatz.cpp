@@ -548,7 +548,7 @@ bool validBracketQ(const Bracket& br) {
 //  Numerator partition generation
 // ================================================================
 void genPartitions(
-    vector<pair<int,int>>& tally, // {index, remaining count}
+    vector<pair<int,int>>& tally, // {index, count}
     const vector<Bracket>& denomBr,
     vector<Bracket>& current,
     vector<vector<Bracket>>& results)
@@ -558,33 +558,25 @@ void genPartitions(
     if (total == 0) { results.push_back(current); return; }
     if (total < 4) return;
     
-    // Find first element with count > 0
-    int firstIdx = -1;
-    for (auto& [idx, cnt] : tally) if (cnt > 0) { firstIdx = idx; break; }
-    if (firstIdx < 0) return;
+    // Get DISTINCT elements with positive count (matching Mathematica's elems)
+    vector<int> elems;
+    for (auto& [idx, cnt] : tally) if (cnt > 0) elems.push_back(idx);
+    if (elems.empty()) return;
     
-    // Build pool of available indices
-    vector<int> pool;
-    for (auto& [idx, cnt] : tally) for (int i = 0; i < cnt; i++) pool.push_back(idx);
+    int firstElem = elems[0];
+    int nElems = elems.size();
     
-    // Generate all 4-subsets containing firstIdx (use first occurrence only)
-    int n = pool.size();
-    set<Bracket> tried;
-    
-    // First element must be firstIdx — find its position
-    int firstPos = -1;
-    for (int i = 0; i < n; i++) if (pool[i] == firstIdx) { firstPos = i; break; }
-    
-    for (int j = firstPos + 1; j < n; j++) {
-        for (int k = j + 1; k < n; k++) {
-            for (int l = k + 1; l < n; l++) {
-                Bracket br = {pool[firstPos], pool[j], pool[k], pool[l]};
+    // Generate all 4-subsets of elems containing firstElem as smallest
+    // (Mathematica: Select[Subsets[elems, {4}], #[[1]] === First[elems] &])
+    for (int j = 1; j < nElems; j++) {
+        for (int k = j + 1; k < nElems; k++) {
+            for (int l = k + 1; l < nElems; l++) {
+                Bracket br = {firstElem, elems[j], elems[k], elems[l]};
                 sort(br.begin(), br.end());
-                if (!tried.insert(br).second) continue;
-                if (!validBracketQ(br)) continue;
-                if (find(denomBr.begin(), denomBr.end(), br) != denomBr.end()) continue;
                 
-                // Reduce tally
+                if (!validBracketQ(br)) continue;
+                
+                // Check counts: each element in br must have count >= 1
                 auto newTally = tally;
                 bool ok = true;
                 for (int idx : br) {
@@ -964,8 +956,13 @@ int main(int argc, char* argv[]) {
             for (int j = 0; j < nKin; j++) row[j] -= f * basis[b][j];
         }
         
+        // Relative pivot threshold: reject if residual is tiny compared to original row
+        double rowNorm = 0;
+        for (int j = 0; j < nKin; j++) rowNorm = max(rowNorm, abs(matT[i][j]));
+        
         int piv = -1;
-        double best = 1e-8;
+        double thresh = max(5e-6 * rowNorm, 1e-14);
+        double best = thresh;
         for (int j = 0; j < nKin; j++) {
             if (abs(row[j]) > best) { best = abs(row[j]); piv = j; }
         }
